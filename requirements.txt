@@ -4,8 +4,8 @@ celery
 upstash-redis
 python-dotenv
 
-crewai==0.35.9
-crewai-tools==0.3.0
+crewai
+crewai-tools
 langchain
 langchain-community
 langchain-huggingface
