@@ -17,8 +17,12 @@ UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
 if not UPSTASH_REDIS_URL or not UPSTASH_REDIS_TOKEN:
     raise ValueError("Les variables d'environnement UPSTASH_REDIS_URL et UPSTASH_REDIS_TOKEN sont requises.")
 
-# Formatage de l'URL pour Celery
-broker_url = f"rediss://:{UPSTASH_REDIS_TOKEN}@{UPSTASH_REDIS_URL.replace('https://', '')}"
+# Formatage de l'URL pour Celery avec SSL
+# Format: rediss://:<token>@<host>:<port>/<db>
+redis_host = UPSTASH_REDIS_URL.replace('https://', '').replace('http://', '')
+broker_url = f"rediss://:{UPSTASH_REDIS_TOKEN}@{redis_host}"
+
+print(f"Configuration Redis: {redis_host}")
 
 celery_app = Celery(
     'worker_celery',
@@ -27,48 +31,65 @@ celery_app = Celery(
     broker_connection_retry_on_startup=True
 )
 
+# Configuration Celery optimisée pour Upstash
 celery_app.conf.update(
     task_serializer='json',
     result_serializer='json',
     accept_content=['json'],
     timezone='Europe/Paris',
     enable_utc=True,
-    broker_use_ssl={'ssl_cert_reqs': 'CERT_NONE'},
-    redis_backend_use_ssl={'ssl_cert_reqs': 'CERT_NONE'}
+    
+    # Configuration SSL pour Upstash
+    broker_use_ssl={
+        'ssl_cert_reqs': 'none',
+        'ssl_ca_certs': None,
+        'ssl_certfile': None,
+        'ssl_keyfile': None,
+    },
+    redis_backend_use_ssl={
+        'ssl_cert_reqs': 'none',
+        'ssl_ca_certs': None,
+        'ssl_certfile': None,
+        'ssl_keyfile': None,
+    },
+    
+    # Gestion des erreurs
+    task_reject_on_worker_lost=True,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
+    
+    # Retry settings
+    task_routes={
+        'tasks.run_interview_analysis': {'queue': 'analysis'},
+        'tasks.generate_report': {'queue': 'reports'}
+    }
 )
 
-@celery_app.task(name="tasks.run_interview_analysis")
-def run_interview_analysis_task(conversation_history: list, job_description_text: list):
+@celery_app.task(name="tasks.run_interview_analysis", bind=True)
+def run_interview_analysis_task(self, conversation_history: list, job_description_text: list):
     """
     Tâche Celery appelée par l'API ML pour traiter l'analyse d'entretien.
-    Cette tâche peut faire des appels à l'API ML si nécessaire.
     """
-    print("Démarrage de la tâche d'analyse d'entretien...")
+    print(f"Démarrage de la tâche d'analyse d'entretien - Task ID: {self.request.id}")
     
     try:
-        # Ici vous pouvez soit :
-        # 1. Traiter directement avec vos modèles (si vous les avez dans cette API)
-        # 2. Faire des appels à l'API ML pour des traitements spécifiques
-        # 3. Utiliser CrewAI pour générer des rapports
-        
-        # Exemple : simulation d'un traitement long
+        # Simulation d'un traitement long
         import time
-        print("Simulation du traitement d'analyse...")
-        time.sleep(10)  # Simulation de 10 secondes de traitement
         
-        # Si vous devez faire appel à l'API ML pour certains traitements :
-        # ml_response = requests.post(
-        #     f"{ML_API_BASE_URL}/specific-analysis",
-        #     json={
-        #         "conversation_history": conversation_history,
-        #         "job_description_text": job_description_text
-        #     },
-        #     timeout=300
-        # )
+        # Update progress
+        self.update_state(state='PROGRESS', meta={'current': 1, 'total': 5, 'status': 'Initialisation...'})
+        time.sleep(2)
+        
+        self.update_state(state='PROGRESS', meta={'current': 2, 'total': 5, 'status': 'Analyse en cours...'})
+        time.sleep(5)
+        
+        self.update_state(state='PROGRESS', meta={'current': 4, 'total': 5, 'status': 'Finalisation...'})
+        time.sleep(2)
         
         # Résultat simulé
         result = {
             "status": "completed",
+            "task_id": self.request.id,
             "analysis": {
                 "sentiment_score": 0.85,
                 "key_insights": [
@@ -82,7 +103,8 @@ def run_interview_analysis_task(conversation_history: list, job_description_text
                 ]
             },
             "conversation_length": len(conversation_history),
-            "job_match_score": 0.78
+            "job_match_score": 0.78,
+            "processed_at": "2025-07-15T10:30:00Z"
         }
         
         print("Analyse terminée avec succès")
@@ -91,26 +113,36 @@ def run_interview_analysis_task(conversation_history: list, job_description_text
     except Exception as e:
         error_msg = f"Erreur lors de l'analyse: {str(e)}"
         print(error_msg)
-        return {"error": error_msg, "status": "failed"}
+        self.update_state(
+            state='FAILURE',
+            meta={'error': error_msg}
+        )
+        raise self.retry(exc=e, countdown=60, max_retries=3)
 
-@celery_app.task(name="tasks.generate_report")
-def generate_report_task(analysis_data: dict):
+@celery_app.task(name="tasks.generate_report", bind=True)
+def generate_report_task(self, analysis_data: dict):
     """
     Tâche pour générer un rapport détaillé à partir des données d'analyse.
     """
-    print("Génération du rapport en cours...")
+    print(f"Génération du rapport en cours - Task ID: {self.request.id}")
     
     try:
         # Simulation de génération de rapport
         import time
-        time.sleep(5)
+        
+        self.update_state(state='PROGRESS', meta={'current': 1, 'total': 3, 'status': 'Préparation du rapport...'})
+        time.sleep(3)
+        
+        self.update_state(state='PROGRESS', meta={'current': 2, 'total': 3, 'status': 'Génération du contenu...'})
+        time.sleep(4)
         
         report = {
             "report_id": f"RPT_{analysis_data.get('candidate_id', 'unknown')}",
             "generated_at": "2025-07-15T10:30:00Z",
+            "task_id": self.request.id,
             "summary": "Rapport d'analyse d'entretien généré avec succès",
             "detailed_analysis": analysis_data,
-            "pdf_url": f"{ML_API_BASE_URL}/reports/download/123"
+            "status": "completed"
         }
         
         print("Rapport généré avec succès")
@@ -119,4 +151,8 @@ def generate_report_task(analysis_data: dict):
     except Exception as e:
         error_msg = f"Erreur lors de la génération du rapport: {str(e)}"
         print(error_msg)
-        return {"error": error_msg}
+        self.update_state(
+            state='FAILURE',
+            meta={'error': error_msg}
+        )
+        raise self.retry(exc=e, countdown=60, max_retries=3)
