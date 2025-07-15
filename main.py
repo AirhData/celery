@@ -1,12 +1,12 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from celery.result import AsyncResult
 from dotenv import load_dotenv
 
 # Import de la tâche Celery
-from tasks.worker_celery import run_interview_analysis_task, celery_app
+from tasks.worker_celery import run_interview_analysis_task, generate_report_task, celery_app
 
 load_dotenv()
 
@@ -15,34 +15,133 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AIrh Celery Worker Service",
-    description="Service dédié à l'exécution des tâches d'analyse IA.",
+    description="Service Celery pour le traitement des analyses d'entretien en arrière-plan",
     version="1.0.0"
 )
 
 class AnalysisRequest(BaseModel):
     conversation_history: List[Dict[str, Any]]
     job_description_text: str
+    candidate_id: Optional[str] = None
+
+class ReportRequest(BaseModel):
+    analysis_data: Dict[str, Any]
+    candidate_id: Optional[str] = None
 
 class TaskResponse(BaseModel):
     task_id: str
     status: str
     result: Any = None
+    progress: Optional[str] = None
 
 @app.post("/trigger-analysis", response_model=TaskResponse, status_code=202)
 async def trigger_analysis(request: AnalysisRequest):
-    """Déclenche une tâche d'analyse en arrière-plan."""
-    logger.info("Requête reçue pour déclencher une analyse.")
-    task = run_interview_analysis_task.delay(request.conversation_history, [request.job_description_text])
-    return {"task_id": task.id, "status": "PENDING", "result": None}
+    """
+    Endpoint appelé par l'API ML pour déclencher une analyse en arrière-plan.
+    """
+    logger.info(f"Déclenchement d'analyse pour candidat: {request.candidate_id}")
+    
+    try:
+        task = run_interview_analysis_task.delay(
+            request.conversation_history, 
+            [request.job_description_text]
+        )
+        
+        return {
+            "task_id": task.id, 
+            "status": "PENDING", 
+            "result": None,
+            "progress": "Analyse démarrée"
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors du déclenchement de l'analyse: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/analysis-status/{task_id}", response_model=TaskResponse)
-async def get_analysis_status(task_id: str):
-    """Vérifie le statut d'une tâche d'analyse."""
+@app.post("/trigger-report", response_model=TaskResponse, status_code=202)
+async def trigger_report(request: ReportRequest):
+    """
+    Endpoint pour déclencher la génération d'un rapport.
+    """
+    logger.info(f"Déclenchement de génération de rapport pour: {request.candidate_id}")
+    
+    try:
+        task = generate_report_task.delay(request.analysis_data)
+        
+        return {
+            "task_id": task.id,
+            "status": "PENDING",
+            "result": None,
+            "progress": "Génération de rapport démarrée"
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors du déclenchement du rapport: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/task-status/{task_id}", response_model=TaskResponse)
+async def get_task_status(task_id: str):
+    """
+    Endpoint appelé par l'API ML pour vérifier le statut d'une tâche.
+    """
     logger.info(f"Vérification du statut pour la tâche: {task_id}")
-    task_result = AsyncResult(task_id, app=celery_app)
-    return {"task_id": task_id, "status": task_result.status, "result": task_result.result}
+    
+    try:
+        task_result = AsyncResult(task_id, app=celery_app)
+        
+        # Déterminer le message de progression
+        progress_msg = None
+        if task_result.status == "PENDING":
+            progress_msg = "En attente de traitement"
+        elif task_result.status == "STARTED":
+            progress_msg = "Traitement en cours"
+        elif task_result.status == "SUCCESS":
+            progress_msg = "Traitement terminé"
+        elif task_result.status == "FAILURE":
+            progress_msg = "Erreur lors du traitement"
+        
+        return {
+            "task_id": task_id,
+            "status": task_result.status,
+            "result": task_result.result,
+            "progress": progress_msg
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification du statut: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/task/{task_id}")
+async def cancel_task(task_id: str):
+    """
+    Annuler une tâche en cours.
+    """
+    try:
+        celery_app.control.revoke(task_id, terminate=True)
+        return {"message": f"Tâche {task_id} annulée"}
+    except Exception as e:
+        logger.error(f"Erreur lors de l'annulation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def health_check():
-    """Vérifie que le service est en ligne."""
-    return {"status": "ok"}
+    """Health check de l'API Celery."""
+    return {
+        "status": "ok",
+        "service": "AIrh Celery Worker",
+        "active_tasks": len(celery_app.control.inspect().active() or {})
+    }
+
+@app.get("/worker-stats")
+async def worker_stats():
+    """Statistiques des workers Celery."""
+    try:
+        inspect = celery_app.control.inspect()
+        stats = inspect.stats()
+        active = inspect.active()
+        registered = inspect.registered()
+        
+        return {
+            "stats": stats,
+            "active_tasks": active,
+            "registered_tasks": registered
+        }
+    except Exception as e:
+        return {"error": f"Impossible d'obtenir les stats: {e}"}
