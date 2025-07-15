@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: airh-celery-worker
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "celery -A main worker --loglevel=info --concurrency=1"
+    envVars:
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: UPSTASH_REDIS_TOKEN
+        sync: false
+      - key: HF_API_URL
+        value: "https://quentinl52-interview-agents-api.hf.space"
