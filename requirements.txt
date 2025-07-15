@@ -3,15 +3,5 @@ uvicorn[standard]
 celery
 upstash-redis
 python-dotenv
-
-crewai
-crewai-tools
-langchain
-langchain-community
-langchain-huggingface
-langchain-openai
-langchain_groq
-langgraph
-sentence-transformers
-torch
-faiss-cpu
+requests
+pydantic
