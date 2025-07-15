@@ -2,11 +2,7 @@ import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-from celery.result import AsyncResult
 from dotenv import load_dotenv
-
-# Import de la tâche Celery
-from tasks.worker_celery import run_interview_analysis_task, generate_report_task, celery_app
 
 load_dotenv()
 
@@ -18,6 +14,17 @@ app = FastAPI(
     description="Service Celery pour le traitement des analyses d'entretien en arrière-plan",
     version="1.0.0"
 )
+
+# Import Celery avec gestion d'erreur
+try:
+    from celery.result import AsyncResult
+    from tasks.worker_celery import run_interview_analysis_task, generate_report_task, celery_app
+    CELERY_AVAILABLE = True
+    logger.info("✅ Celery importé avec succès")
+except Exception as e:
+    logger.error(f"❌ Erreur import Celery: {e}")
+    CELERY_AVAILABLE = False
+    celery_app = None
 
 class AnalysisRequest(BaseModel):
     conversation_history: List[Dict[str, Any]]
@@ -39,6 +46,12 @@ async def trigger_analysis(request: AnalysisRequest):
     """
     Endpoint appelé par l'API ML pour déclencher une analyse en arrière-plan.
     """
+    if not CELERY_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Service Celery indisponible - worker non démarré"
+        )
+    
     logger.info(f"Déclenchement d'analyse pour candidat: {request.candidate_id}")
     
     try:
@@ -62,6 +75,12 @@ async def trigger_report(request: ReportRequest):
     """
     Endpoint pour déclencher la génération d'un rapport.
     """
+    if not CELERY_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Service Celery indisponible - worker non démarré"
+        )
+    
     logger.info(f"Déclenchement de génération de rapport pour: {request.candidate_id}")
     
     try:
@@ -82,6 +101,12 @@ async def get_task_status(task_id: str):
     """
     Endpoint appelé par l'API ML pour vérifier le statut d'une tâche.
     """
+    if not CELERY_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Service Celery indisponible - worker non démarré"
+        )
+    
     logger.info(f"Vérification du statut pour la tâche: {task_id}")
     
     try:
@@ -113,6 +138,12 @@ async def cancel_task(task_id: str):
     """
     Annuler une tâche en cours.
     """
+    if not CELERY_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Service Celery indisponible - worker non démarré"
+        )
+    
     try:
         celery_app.control.revoke(task_id, terminate=True)
         return {"message": f"Tâche {task_id} annulée"}
@@ -126,12 +157,19 @@ async def health_check():
     return {
         "status": "ok",
         "service": "AIrh Celery Worker",
-        "active_tasks": len(celery_app.control.inspect().active() or {})
+        "celery_available": CELERY_AVAILABLE,
+        "message": "API FastAPI fonctionnelle" + (" - Celery OK" if CELERY_AVAILABLE else " - Celery KO")
     }
 
 @app.get("/worker-stats")
 async def worker_stats():
     """Statistiques des workers Celery."""
+    if not CELERY_AVAILABLE:
+        return {
+            "error": "Celery non disponible",
+            "celery_available": False
+        }
+    
     try:
         inspect = celery_app.control.inspect()
         stats = inspect.stats()
@@ -141,7 +179,11 @@ async def worker_stats():
         return {
             "stats": stats,
             "active_tasks": active,
-            "registered_tasks": registered
+            "registered_tasks": registered,
+            "celery_available": True
         }
     except Exception as e:
-        return {"error": f"Impossible d'obtenir les stats: {e}"}
+        return {
+            "error": f"Impossible d'obtenir les stats: {e}",
+            "celery_available": False
+        }
