@@ -5,3 +5,4 @@ upstash-redis
 python-dotenv
 requests
 pydantic
+redis
